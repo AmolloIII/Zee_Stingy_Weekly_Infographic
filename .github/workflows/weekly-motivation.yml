@@ -71,7 +71,7 @@ jobs:
           SMTP_PASSWORD:     ${{ secrets.SMTP_PASSWORD }}
           BOT_TOKEN:         ${{ secrets.BOT_TOKEN }}
           CHAT_ID:           ${{ secrets.CHAT_ID }}
-        run: Rscript weekly_motivation.R
+        run: Rscript zee_weekly_Infographic.R
 
       - name: Assemble Pages site
         run: |
