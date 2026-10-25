@@ -1,0 +1,98 @@
+name: Weekly Motivation Report
+
+on:
+  schedule:
+    # GitHub cron is UTC. Nairobi is UTC+3 year‑round (no DST).
+    # Friday 18:00 EAT  -> Friday 15:00 UTC
+    - cron: "0 15 * * 5"
+    # Monday 10:00 EAT  -> Monday 07:00 UTC
+    - cron: "0 7 * * 1"
+  workflow_dispatch:   # lets you trigger a run manually
+
+# Required for actions/deploy-pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Don't let two runs race on the Pages deployment
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  TZ: Africa/Nairobi
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "release"
+          use-public-rspm: true
+
+      - name: Install R packages
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          cache-version: 1
+          packages: |
+            any::googlesheets4
+            any::dplyr
+            any::lubridate
+            any::htmltools
+            any::blastula
+            any::httr
+            any::webshot2
+
+      - name: Set up Chrome (for webshot2 PNG rendering)
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Run report script
+        env:
+          # Tell webshot2 which Chrome binary to use
+          CHROMOTE_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+          # Secrets (configure these in repo Settings → Secrets and variables → Actions)
+          SHEET_ID:          ${{ secrets.SHEET_ID }}
+          GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
+          MY_GMAIL_ACCOUNT:  ${{ secrets.MY_GMAIL_ACCOUNT }}
+          SMTP_PASSWORD:     ${{ secrets.SMTP_PASSWORD }}
+          BOT_TOKEN:         ${{ secrets.BOT_TOKEN }}
+          CHAT_ID:           ${{ secrets.CHAT_ID }}
+        run: Rscript weekly_motivation.R
+
+      - name: Assemble Pages site
+        run: |
+          set -euo pipefail
+          mkdir -p public
+          cp weekly_motivation_output/weekly_motivation.html public/index.html
+          [ -f weekly_motivation_output/weekly_motivation.csv ] \
+            && cp weekly_motivation_output/weekly_motivation.csv public/ || true
+          [ -f weekly_motivation_output/weekly_motivation.png ] \
+            && cp weekly_motivation_output/weekly_motivation.png public/ || true
+          touch public/.nojekyll
+          ls -lh public
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
