@@ -363,7 +363,7 @@ send_email_notification <- function(df) {
       email = body,
       from = sender,
       to = "benamolo@gmail.com",
-      bcc = recipients,
+      # bcc = recipients,
       subject = paste0(
         "The Stingy11 | Round ", unique(df$Round),
         " | ", Sys.Date()
