@@ -1,14 +1,16 @@
-
 library(googlesheets4)
 library(dplyr)
 library(lubridate)
 library(htmltools)
 
 Sys.setenv(TZ = "Africa/Nairobi")
-REPORT_ROUND <- 4L
+REPORT_ROUND <- 5L
 EXPECTED_PAYOUT <- 5000
 # Keep verified round starts explicit; set the start before selecting a new round.
-ROUND_STARTS <- c(`1` = "2026-02-08", `4` = "2026-08-30")
+ROUND_STARTS <- c(`1` = "2026-02-08", `4` = "2026-08-30", `5` = "2026-11-15")
+ROUND5_FINAL_SUNDAY <- as.Date("2026-12-20")
+ROUND5_WEEKLY_TOPUP <- 500
+DAILY_SAVINGS_INCREMENT <- 15
 SEND_NOTIFICATIONS <- TRUE
 SEND_EMAIL <- TRUE
 SEND_TELEGRAM_TEXT <- TRUE
@@ -24,7 +26,7 @@ OUTPUT_DIR <- "weekly_motivation_output"
 # Optional: CHROMOTE_CHROME = absolute path to Chrome for PNG rendering.
 
 add_ordinal <- function(day) {
-  suffix <- ifelse(day %% 100 %in% 11:13, "th",
+  suffix <- ifelse((day %% 100) %in% 11:13, "th",
     c("th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th")[day %% 10 + 1])
   paste0(day, suffix)
 }
@@ -65,6 +67,37 @@ authenticate_sheets <- function() {
   gs4_auth(path = f)
 }
 
+scheduled_payout_dates <- function(round, start, position) {
+  if (round != 5L) return(start + 7L * (position - 1L))
+
+  sundays <- seq(start, ROUND5_FINAL_SUNDAY, by = "week")
+  # Two positions on each of the first five Sundays, one on the final Sunday.
+  capacity <- c(rep(2L, length(sundays) - 1L), 1L)
+  if (length(position) != sum(capacity)) {
+    stop("Round 5 requires 11 positions for the agreed six-Sunday schedule.")
+  }
+  rep(sundays, capacity)[position]
+}
+
+round5_week_target <- function(sunday) {
+  days_in_week <- seq(sunday - 6L, sunday, by = "day")
+  base <- DAILY_SAVINGS_INCREMENT * sum(as.integer(format(days_in_week, "%d")))
+  topup <- if (sunday < ROUND5_FINAL_SUNDAY) ROUND5_WEEKLY_TOPUP else 0
+  base + topup
+}
+
+upcoming_payout <- function(df) {
+  eligible <- which(df$DaysUntil >= 0L)
+  if (!length(eligible)) return(df[integer(), , drop = FALSE])
+
+  next_date <- min(df$PayoutRaw[eligible])
+  df[df$PayoutRaw == next_date, , drop = FALSE]
+}
+
+format_kes <- function(amount) {
+  paste("KES", formatC(amount, format = "f", digits = 0, big.mark = ","))
+}
+
 build_schedule <- function(order, payouts, today = Sys.Date()) {
   if (!all(c("Member") %in% names(order)) || !"Member" %in% names(payouts))
     stop("Both sheets must have a Member column.")
@@ -98,7 +131,7 @@ build_schedule <- function(order, payouts, today = Sys.Date()) {
     r <- as.integer(sub("Round ", "", col, fixed = TRUE))
     data.frame(key = order$key, full_name = order$Member, Round = r,
                Position = as.integer(pos),
-               PayoutRaw = start + 7 * (pos - 1L))
+               PayoutRaw = scheduled_payout_dates(r, start, as.integer(pos)))
   })) %>% arrange(PayoutRaw)
   # Date-column headings are day/month/year, as in the screenshot.
   # Total Payouts is a lifetime summary and is NEVER allocated to a round.
@@ -118,7 +151,7 @@ build_schedule <- function(order, payouts, today = Sys.Date()) {
     warning("Future-dated payouts excluded from amounts received as of today.")
   # Only receipts within the selected round window are considered.
   # Date-only columns cannot identify cross-round arrears unambiguously.
-  window_end <- start + 7 * n
+  window_end <- max(schedule$PayoutRaw) + 7L
   next_starts <- as.Date(unname(ROUND_STARTS))
   next_starts <- next_starts[!is.na(next_starts) & next_starts > start]
   if (length(next_starts)) window_end <- min(window_end, min(next_starts))
@@ -187,21 +220,36 @@ create_infographic_body <- function(df) {
   upcoming <- sum(df$Status == "Upcoming")
   pct <- round(100 * paid / n)
   round <- unique(df$Round)
+  is_round5 <- round == 5L
+  next_payout <- upcoming_payout(df)
+  target_value <- if (nrow(next_payout) && is_round5) {
+    format_kes(round5_week_target(next_payout$PayoutRaw[1L]))
+  } else {
+    "&mdash;"
+  }
+  target_label <- if (nrow(next_payout) && is_round5) {
+    paste0("Weekly target per member<br>Week ending ", format(next_payout$PayoutRaw[1L], "%d %b"))
+  } else {
+    "Weekly target per member<br>Schedule ended"
+  }
+  card_width <- if (is_round5) "20%" else "25%"
   generated <- format(Sys.time(), "%d %B %Y, %I:%M %p", tz = "Africa/Nairobi")
   date_span <- paste(format(min(df$PayoutRaw), "%d %b"),
                      format(max(df$PayoutRaw), "%d %b %Y"), sep = " &ndash; ")
-  card <- function(value, label, color, bg) paste0(
-    "<td width='25%' style='padding:5px;vertical-align:top;'>",
+  card <- function(value, label, color, bg, size = 30) paste0(
+    "<td width='", card_width, "' style='padding:5px;vertical-align:top;'>",
     "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='background:", bg,
     ";border:1px solid #e7e8f0;border-radius:12px;'><tr><td style='padding:18px 6px;text-align:center;'>",
-    "<div style='font-size:30px;line-height:36px;font-weight:800;color:", color, ";'>", value, "</div>",
+    "<div style='font-size:", size, "px;line-height:36px;font-weight:800;color:", color, ";'>", value, "</div>",
     "<div style='font-size:12px;color:#667085;margin-top:5px;'>", label, "</div>",
     "</td></tr></table></td>")
   cards <- paste0("<table role='presentation' width='100%' cellpadding='0' cellspacing='0'><tr>",
     card(paid, "Paid", "#157347", "#f0faf4"),
     card(due, "Current / partial", "#2459bd", "#f3f6ff"),
     card(attention, "Overdue", "#b42318", "#fff5f3"),
-    card(upcoming, "Upcoming", "#6355ba", "#f7f5ff"), "</tr></table>")
+    card(upcoming, "Upcoming", "#6355ba", "#f7f5ff"),
+    if (is_round5) card(target_value, target_label, "#087b69", "#edf9f5", size = 21),
+    "</tr></table>")
   # Draw a table-based progress bar for broad email compatibility.
   bar <- if (pct == 0) {
     "<td width='100%' height='9' style='background:#e9e8f5;border-radius:8px;'></td>"
@@ -218,6 +266,18 @@ create_infographic_body <- function(df) {
     paste0("<strong>", esc(pending$full_name), "</strong> &nbsp;&middot;&nbsp; ",
            esc(pending$Status), " &nbsp;&middot;&nbsp; ", esc(pending$Timeline))
   }
+  spotlight_title <- if (nrow(unpaid)) "FIRST UNPAID POSITION" else "ROUND COMPLETE"
+  if (is_round5 && nrow(next_payout)) {
+    spotlight_title <- "NEXT SCHEDULED TOKEN PAYOUT"
+    spotlight <- paste0(
+      esc(next_payout$PayoutDate[1L]), "<br>",
+      paste0("<strong>", esc(next_payout$full_name), "</strong> &middot; ",
+             esc(next_payout$Status), collapse = "<br>")
+    )
+  } else if (is_round5 && nrow(unpaid)) {
+    spotlight_title <- "ROUND 5 SCHEDULE ENDED"
+    spotlight <- "See the table below for any outstanding token payments."
+  }
   rows <- vapply(seq_len(n), function(i) {
     pal <- status_palette(df$Status[i])
     bg <- if (i %% 2L == 0L) "#f8f9fd" else "#ffffff"
@@ -231,6 +291,8 @@ create_infographic_body <- function(df) {
       "<span style='display:inline-block;padding:5px 9px;border-radius:20px;font-size:11px;font-weight:700;background:",
       pal['bg'], ";color:", pal['fg'], ";'>", esc(df$Status[i]), "</span></td>",
       "<td style='padding:13px 10px;border-bottom:1px solid #edf0f5;font-size:12px;color:#667085;'>",
+      if (is_round5) paste0("<strong>", esc(format(df$PayoutRaw[i], "%d %b")),
+                           "</strong><br>"),
       esc(df$Timeline[i]), "</td></tr>")
   }, character(1))
   paste0(
@@ -251,7 +313,7 @@ create_infographic_body <- function(df) {
     "<tr><td style='padding:0 26px 22px;'><table role='presentation' width='100%' style='background:#f2f0ff;border-radius:10px;'>",
     "<tr><td style='padding:14px 16px;font-size:12px;line-height:1.6;color:#51479f;'>",
     "<div style='font-size:10px;letter-spacing:1px;font-weight:bold;margin-bottom:5px;'>",
-    if (nrow(unpaid)) "FIRST UNPAID POSITION" else "ROUND COMPLETE", "</div>", spotlight, "</td></tr></table></td></tr>",
+    spotlight_title, "</div>", spotlight, "</td></tr></table></td></tr>",
     "<tr><td style='padding:0 26px 8px;font-size:15px;color:#25304c;font-weight:bold;'>Round ", round, " at a glance</td></tr>",
     "<tr><td style='padding:4px 16px 20px;'><table width='100%' cellpadding='0' cellspacing='0' ",
     "style='border-collapse:collapse;font-size:13px;table-layout:fixed;'>",
@@ -401,6 +463,20 @@ send_telegram_notification <- function(df) {
   tryCatch({
     lines <- paste0(df$Position, ". ", df$full_name, " | ", df$Status, "\n", df$Timeline)
     title <- paste0("THE STINGY11 - ROUND ", unique(df$Round), "\nWeekly motivation tokens\n\n")
+    if (unique(df$Round) == 5L) {
+      next_payout <- upcoming_payout(df)
+      if (nrow(next_payout)) {
+        sunday <- next_payout$PayoutRaw[1L]
+        title <- paste0(title, "Scheduled for ", next_payout$PayoutDate[1L], "\n",
+                        paste(next_payout$full_name, collapse = " and "), "\n",
+                        "Weekly target: ", format_kes(round5_week_target(sunday)),
+                        " per member\n\n")
+      } else {
+        title <- paste0(title, "The Round 5 payout schedule has ended.\n\n")
+      }
+      lines <- paste0(df$Position, ". ", df$full_name, " | ", df$Status, "\n",
+                      format(df$PayoutRaw, "%d %b"), " | ", df$Timeline)
+    }
     # Split at member boundaries to stay within Telegram's message limit.
     chunks <- character()
     current <- title
